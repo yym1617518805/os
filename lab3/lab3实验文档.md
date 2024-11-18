@@ -39,7 +39,7 @@ do_pgfault 的主要职责是处理缺页异常，在虚拟地址未映射时，
 
 _clock_init_mm函数
 根据要求，初始化pra_list_head为空链表，然后初始化当前指针curr_ptr指向pra_list_head，表示当前页面替换位置为链表头，并将mm的私有成员指针指向pra_list_head，用于后续的页面替换算法操作。
-
+```
 static int _clock_init_mm(struct mm_struct *mm)
 {     
      /*LAB3 EXERCISE 4: YOUR CODE*/ 
@@ -49,10 +49,10 @@ static int _clock_init_mm(struct mm_struct *mm)
      mm->sm_priv = &pra_list_head;
      return 0;
 }
-
+```
 _clock_map_swappable函数
 根据要求，使用list_add函数将页面page插入到页面链表pra_list_head的末尾,然后将页面的visited标志置为1，表示该页面已被访问。
-
+```
 static int _clock_map_swappable(struct mm_struct *mm, uintptr_t addr, struct Page *page, int swap_in)
 {
     list_entry_t *entry=&(page->pra_page_link);
@@ -65,10 +65,10 @@ static int _clock_map_swappable(struct mm_struct *mm, uintptr_t addr, struct Pag
     page->visited = 1;
     return 0;
 }
-
+```
 _clock_swap_out_victim函数
 因为head指针不能使用le2page转成page结构体指针，所以首先需要进行检查。然后从链表末尾反向遍历，直至找到首个访问标记为0的项，将其移除可以交换到页链表中。在过程中遇到的页面如果访问标记为1，则将其改为0，表示该页面已被重新访问。
-
+```
 static int _clock_swap_out_victim(struct mm_struct *mm, struct Page ** ptr_page, int in_tick)
 {
      list_entry_t *head=(list_entry_t*) mm->sm_priv;
@@ -106,7 +106,7 @@ static int _clock_swap_out_victim(struct mm_struct *mm, struct Page ** ptr_page,
     }
     return 0;
 }
-
+```
 ④请回答如下问题：比较Clock页替换算法和FIFO算法的不同。
 
 先进先出(First In First Out, FIFO)页替换算法：该算法总是淘汰最先进入内存的页，即选择在内存中驻留时间最久的页予以淘汰。只需把一个应用程序在执行过程中已调入内存的页按先后次序链接成一个队列，队列头指向内存中驻留时间最久的页，队列尾指向最近被调入内存的页。这样需要淘汰页时，从队列头很容易查找到需要淘汰的页。FIFO 算法只是在应用程序按线性顺序访问地址空间时效果才好，否则效率不高。因为那些常被访问的页，往往在内存中也停留得最久，结果它们因变“老”而不得不被置换出去。FIFO 算法的另一个缺点是，它有一种异常现象（Belady 现象），即在增加放置页的物理页帧的情况下，反而使页访问异常次数增多。
