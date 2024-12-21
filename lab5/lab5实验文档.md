@@ -19,170 +19,6 @@
 
 本实验依赖实验1/2/3/4。请把你做的实验1/2/3/4的代码填入本实验中代码中有“LAB1”/“LAB2”/“LAB3”/“LAB4”的注释相应部分。注意：为了能够正确执行lab5的测试应用程序，可能需对已完成的实验1/2/3/4的代码进行进一步改进。
 
-#### 合并并修改代码1——alloc_proc函数
-
-```c++
-// alloc_proc - alloc a proc_struct and init all fields of proc_struct
-static struct proc_struct *
-alloc_proc(void)
-{
-    struct proc_struct *proc = kmalloc(sizeof(struct proc_struct));
-    if (proc != NULL)
-    {
-        proc->state = PROC_UNINIT; // 设置进程为初始态
-        proc->pid = -1;            // 设置进程pid的未初始化值
-        proc->runs = 0;
-        proc->kstack = 0;
-        proc->need_resched = 0;
-        proc->parent = NULL;
-        proc->mm = NULL;
-        memset(&(proc->context), 0, sizeof(struct context));
-        proc->tf = NULL;
-        proc->cr3 = boot_cr3; // 使用内核页目录表的基址
-        proc->flags = 0;
-        memset(proc->name, 0, PROC_NAME_LEN);
-
-        // 新增
-        proc->wait_state = 0;                        // PCB新增的条目，初始化进程等待状态
-        proc->cptr = proc->yptr = proc->optr = NULL; // 设置指针为空
-        // ffang：这两行代码主要是初始化进程等待状态、和进程的相关指针，例如父进程、子进程、同胞等等。
-        // 其中的wait_state是进程控制块中新增的条目。避免之后由于未定义或未初始化导致管理用户进程时出现错误。
-    }
-    return proc;
-}
-```
-
-改进的内容为：
-
-```c++
-proc->wait_state = 0; //初始化进程等待状态
-proc->cptr = proc->optr = proc->yptr = NULL; //指针初始化
-```
-
-代码用于初始化进程等待状态、和进程的相关指针，例如父进程、子进程、同胞等等。其中的wait_state是[进程控制块](https://so.csdn.net/so/search?q=进程控制块&spm=1001.2101.3001.7020)中新增的条目。避免之后由于未定义或未初始化导致管理用户进程时出现错误。
-
-#### 合并并修改代码2——do_fork函数
-
-```c++
-int do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf)
-{
-    int ret = -E_NO_FREE_PROC;
-    struct proc_struct *proc;
-    if (nr_process >= MAX_PROCESS)
-    {
-        goto fork_out;
-    }
-    ret = -E_NO_MEM;
-    // LAB4:EXERCISE2 2112614
-
-    //    1. call alloc_proc to allocate a proc_struct
-    proc = alloc_proc(); // 本质上是用kmlloc函数分配了一块内存空间，然后将proc指向这块内存空间
-    if (proc == NULL)
-    {
-        goto fork_out;
-    }
-    /*LAB5 UPDATE1: 2111194*/
-    proc->parent = current;           // 将子进程的父进程设置为当前进程，后面用这个当前进程控制子进程的资源释放
-    assert(current->wait_state == 0); // 确保进程在等待（确保当前进程的wait_state为0）
-
-    //    2. call setup_kstack to allocate a kernel stack for child process
-    ret = setup_kstack(proc);
-    if (ret != 0)
-    {
-        goto bad_fork_cleanup_proc;
-    }
-
-    //    3. call copy_mm to dup OR share mm according clone_flag
-    ret = copy_mm(clone_flags, proc); // 根据clone_flags决定是复制还是共享内存管理系统
-    if (ret != 0)
-    {
-        goto bad_fork_cleanup_kstack;
-    }
-
-    //    4. call copy_thread to setup tf & context in proc_struct
-    copy_thread(proc, stack, tf);
-
-    //    5. insert proc_struct into hash_list && proc_list
-    bool intr_flag;
-    local_intr_save(intr_flag);
-    {
-        proc->pid = get_pid(); // 分配一个新的不重复的pid
-
-        // list_add(&proc_list, &(proc->list_link));
-        // nr_process++;
-        /*LAB5 UPDATE2: 2111194*/
-        // 将proc_struct插入到hash_list和proc_list中（上面已做），设置进程的关系链接
-        set_links(proc); // 设置进程链接
-        hash_proc(proc); // 将进程插入到hash_list中
-    }
-    local_intr_restore(intr_flag);
-
-    //    6. call wakeup_proc to make the new child process RUNNABLE
-    wakeup_proc(proc); // 设置proc的state为PROC_RUNNABLE，使得进程可以被调度执行
-
-    //    7. set ret vaule using child proc's pid
-    ret = proc->pid;
-
-
-fork_out:
-    return ret;
-
-bad_fork_cleanup_kstack:
-    put_kstack(proc);
-bad_fork_cleanup_proc:
-    kfree(proc);
-    goto fork_out;
-}
-```
-
-改进内容为：
-
-```c++
-assert(current->wait_state == 0); //确保进程在等待
-set_links(proc); //设置进程链接
-```
-
-第一行代码需要确保当前进程正在等待，我们在alloc_proc中初始化wait_state为0。
-
-#### 合并并修改代码3——proc_run、do_pgfault函数
-
-直接填入lab4代码，不需要修改
-
-#### 其他已经修改好的部分解释——interrupt_handler函数
-
-```c++
-void interrupt_handler(struct trapframe *tf)
-{
-    intptr_t cause = (tf->cause << 1) >> 1;
-    switch (cause)
-    {
-    // ......代码省略
-    case IRQ_S_TIMER:
-        // "All bits besides SSIP and USIP in the sip register are
-        // read-only." -- privileged spec1.9.1, 4.1.4, p59
-        // In fact, Call sbi_set_timer will clear STIP, or you can clear it
-        // directly.
-        // clear_csr(sip, SIP_STIP);
-        clock_set_next_event();
-        if (++ticks % TICK_NUM == 0 && current)
-        {
-            // print_ticks();
-            current->need_resched = 1;
-        }
-        break;
-    // ......代码省略
-    default:
-        print_trapframe(tf);
-        break;
-    }
-}
-```
-
-改动：
-
-- 不输出“100ticks"
-- 每100次时间中断后，当前正在执行的进程准备被调度，用于用户态线程切换
-- 
 
 ## 练习1: 加载应用程序并执行（需要编码）
 
@@ -200,43 +36,6 @@ void interrupt_handler(struct trapframe *tf)
 
 `user_main`----->`kernel_execve`----->`sys_exec`----->`do_execve`----->`load_icode`
 
-`user_main`函数：
-
-```c++
-user_main(void *arg)
-{
-#ifdef TEST
-    KERNEL_EXECVE2(TEST, TESTSTART, TESTSIZE);
-#else
-    KERNEL_EXECVE(exit);
-#endif
-    panic("user_main execve failed.\n");
-}
-```
-
-在`make grade`中指定了`TEST`，将会执行`forktest`用户进程，随后进入相应的宏定义
-
-```c++
-#define __KERNEL_EXECVE(name, binary, size) ({           \
-    cprintf("kernel_execve: pid = %d, name = \"%s\".\n", \
-            current->pid, name);                         \
-    kernel_execve(name, binary, (size_t)(size));         \
-})
-```
-
-进而进入`kernel_execve`函数，其中的内联汇编部分将会触发系统调用，随后调用函数`sys_exec`，进而调用函数`do_execve`
-
-```c++
-static int
-sys_exec(uint64_t arg[])
-{
-    const char *name = (const char *)arg[0];
-    size_t len = (size_t)arg[1];
-    unsigned char *binary = (unsigned char *)arg[2];
-    size_t size = (size_t)arg[3];
-    return do_execve(name, len, binary, size);
-}
-```
 
 `do_execve`函数主要做的工作就是先回收自身所占用户空间，然后调用`load_icode`，用新的程序覆盖内存空间，形成一个执行新程序的新进程。
 
@@ -381,62 +180,23 @@ tf->epc = elf->e_entry;
 tf->status = (read_csr(sstatus) | SSTATUS_SPIE ) & ~SSTATUS_SPP;
 ```
 
-- `tf->gpr.sp` ：设置用户栈指针为用户栈的顶部。
-- `tf->epc` ：设置用户程序的入口地址。
-- `tf->status` ：设置状态寄存器，确保用户程序在用户态运行，并开启中断
-
-
-
-#### 2、简述经过
-
-1. **进程创建和等待：**
-
-   - **Initproc 和 Userproc：** 内核线程 `initproc` 完成用户态进程 `userproc` 的创建。
-   - **等待子进程：** `initproc` 接着调用 `do_wait` 函数，等待有 `RUNNABLE` 状态的子进程出现。
-
-2. **进程调度和运行：**
-
-   - **启动新线程：** 一旦 `do_wait` 确认存在 `RUNNABLE` 子进程，schedule 函数便被激活。
-
-   - `proc_run` 功能：
-
-      `schedule` 通过 `proc_run` 来运行新线程。`proc_run` 执行三个主要操作：
-
-     - 设定 `userproc` 的栈指针。
-     - 重新加载与用户态相关的页目录表。
-     - 切换到 `userproc` 的上下文，并跳至 `forkret` 函数。
-
-3. **进程切换和系统调用处理：**
-
-   - **处理 forkrets 和 __trapret：** `forkret` 调用 `forkrets` 函数，进而跳到 `__trapret`。这里，`userproc->tf` 的内容被恢复到寄存器，并通过 `iret` 指令跳转到 `kernel_thread_entry`。
-   - **kernel_thread_entry 的任务：** 这个函数先压栈再跳转到 `user_main` 函数。
-   - **执行 user_main 和 kernel_execve：** `user_main` 打印进程信息后，调用 `kernel_execve` 执行 `exec` 系统调用。
-
-4. **应用程序加载和执行：**
-
-   - **do_execve 函数：** CPU 在捕捉到系统调用后，进行一系列的函数跳转，最终进入 `do_execve`。
-   - **内存空间处理：** `do_execve` 检查并释放虚拟内存空间，包括 vma、mm 和页目录表。
-   - **加载应用程序：** 通过 `load_icode` 加载应用程序，创建新的 mm 结构和页目录表，分配内存并初始化 BSS section。
-   - **设置进程状态：** 加载页目录表到 cr3 寄存器，设置用户进程的 tf 结构。
-
-5. **从内核态到用户态的转换：**
-
-   - **__trapret 的角色：** 最后，程序返回到 `__trapret` 函数，从 `userproc->tf.tf_eip` 跳转到应用程序入口，如 exit.c 文件中的 main 函数。
-   - **寄存器状态维护：** 这个过程中，`alltraps` 和 `trapret` 函数巧妙地维持了中断处理前后各寄存器的状态，同时实现了从内核态到用户态的平滑过渡。
-
 
 
 
 
 ## 练习2: 父进程复制自己的内存空间给子进程（需要编码）
 
-创建子进程的函数`do_fork`在执行中将拷贝当前进程（即父进程）的用户内存地址空间中的合法内容到新进程中（子进程），完成内存资源的复制。具体是通过`copy_range`函数（位于kern/mm/pmm.c中）实现的，请补充`copy_range`的实现，确保能够正确执行。
-
+创建子进程的函数do_fork在执行中将拷贝当前进程（即父进程）的用户内存地址空间中的合法内容到新进程中（子进程），完成内存资源的复制。具体是通过copy_range函数（位于kern/mm/pmm.c中）实现的，请补充copy_range的实现，确保能够正确执行。
 请在实验报告中简要说明你的设计实现过程。
+如何设计实现Copy on Write机制？给出概要设计，鼓励给出详细设计。
+Copy-on-write（简称COW）的基本概念是指如果有多个使用者对一个资源A（比如内存块）进行读操作，则每个使用者只需获得一个指向同一个资源A的指针，就可以该资源了。若某使用者需要对这个资源A进行写操作，系统会对该资源进行拷贝操作，从而使得该“写操作”使用者获得一个该资源A的“私有”拷贝—资源B，可对资源B进行写操作。该“写操作”使用者对资源B的改变对于其他的使用者而言是不可见的，因为其他使用者看到的还是资源A。
 
-- 如何设计实现`Copy on Write`机制？给出概要设计，鼓励给出详细设计。
+首先确保起始地址和结束地址都是页大小的整数倍，确保给定的地址范围位于用户空间内。
+循环遍历内存区域，以页为单位遍历从start到end的内存区域。每次处理一页。通过 get_pte 获取进程 A 的页表项（pte）。如果页表项不存在（即返回NULL），则跳过整个页表（4MB），并继续下一次迭代。如果页表项有效（即设置了PTE_V位），使用get_pte函数为目标进程获取或分配一个页表项。从进程 A 的页表项中找到页面（page2kva 获得内核虚拟地址）。 分配一个新的页面（alloc_page）供进程 B 使用。 使用 memcpy 将页面内容从进程 A 复制到新页面。 通过 page_insert 将新页面映射到进程 B 的页表中。遍历下一页，直到遍历完整个范围。
 
-> Copy-on-write（简称COW）的基本概念是指如果有多个使用者对一个资源A（比如内存块）进行读操作，则每个使用者只需获得一个指向同一个资源A的指针，就可以该资源了。若某使用者需要对这个资源A进行写操作，系统会对该资源进行拷贝操作，从而使得该“写操作”使用者获得一个该资源A的“私有”拷贝—资源B，可对资源B进行写操作。该“写操作”使用者对资源B的改变对于其他的使用者而言是不可见的，因为其他使用者看到的还是资源A。
+Copy-on-Write (COW) 是一种延迟复制技术，主要用于优化内存资源的使用，广泛应用于操作系统的进程创建和内存管理中。在 fork 系统调用中，父子进程通常共享同一块内存，直到其中一个试图修改这块内存时，才会创建副本。
+具体实现：在do_fork部分的内存复制时，不对内存进行复制，而是将两个进程的内存页映射到同一个物理页，在各自的虚拟页上标记该页为不可写，同时设置一个额外的标记位为共享位，表示该页和某些虚拟页共享了一个物理页，当发生修改异常时，进行对应的处理；在page_fault部分对是否是由于写共享页引起的异常增加一个判断，是的话再申请一个物理页来将共享页复制一份，交给出错的进程进行处理，将其原本映射关系改成新的物理页，设置该虚拟页为非共享、可写。对原物理页关联的所有虚拟页，如果其不再被其他进程共享，修改其标志位为非共享、可写。
+
 
 
 
@@ -466,29 +226,116 @@ do_fork()---->copy_mm()---->dup_mmap()---->copy_range()
 
 其实`copy_range`函数就是调用一个memcpy将父进程的内存直接复制给子进程
 
+do_fork()的更改
 ```c++
-int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end, bool share)
-{
-    // 确保start和end可以整除PGSIZE
+int
+do_fork(uint32_t clone_flags, uintptr_t stack, struct trapframe *tf) {
+    int ret = -E_NO_FREE_PROC;
+    struct proc_struct *proc;
+    if (nr_process >= MAX_PROCESS) {
+        goto fork_out;
+    }
+    ret = -E_NO_MEM;
+    //LAB4:EXERCISE2 YOUR CODE
+    /*
+     * Some Useful MACROs, Functions and DEFINEs, you can use them in below implementation.
+     * MACROs or Functions:
+     *   alloc_proc:   create a proc struct and init fields (lab4:exercise1)
+     *   setup_kstack: alloc pages with size KSTACKPAGE as process kernel stack
+     *   copy_mm:      process "proc" duplicate OR share process "current"'s mm according clone_flags
+     *                 if clone_flags & CLONE_VM, then "share" ; else "duplicate"
+     *   copy_thread:  setup the trapframe on the  process's kernel stack top and
+     *                 setup the kernel entry point and stack of process
+     *   hash_proc:    add proc into proc hash_list
+     *   get_pid:      alloc a unique pid for process
+     *   wakeup_proc:  set proc->state = PROC_RUNNABLE
+     * VARIABLES:
+     *   proc_list:    the process set's list
+     *   nr_process:   the number of process set
+     */
+
+    //    1. call alloc_proc to allocate a proc_struct
+    //    2. call setup_kstack to allocate a kernel stack for child process
+    //    3. call copy_mm to dup OR share mm according clone_flag
+    //    4. call copy_thread to setup tf & context in proc_struct
+    //    5. insert proc_struct into hash_list && proc_list
+    //    6. call wakeup_proc to make the new child process RUNNABLE
+    //    7. set ret vaule using child proc's pid
+         // 1. 调用 alloc_proc 分配一个进程控制块
+    if ((proc = alloc_proc()) == NULL)
+    {
+        goto fork_out;
+    }
+    proc->parent = current;
+
+    // 2. 调用 setup_kstack 为进程分配一个内核栈
+    if (setup_kstack(proc) != 0)
+    {
+        goto bad_fork_cleanup_proc;
+    }
+
+    // 3. 调用 copy_mm 根据 clone_flags 复制或共享内存管理信息
+    if (copy_mm(clone_flags, proc) != 0)
+    {
+        goto bad_fork_cleanup_kstack;
+    }
+
+    // 4. 调用 copy_thread 复制原进程的上下文信息
+    copy_thread(proc, stack, tf);
+
+    // 5. 将新进程插入到进程hash列表和进程列表中
+    bool intr_flag;
+
+    proc->pid = get_pid(); // 为子进程获取一个唯一的 PID
+    hash_proc(proc);       // 将子进程添加到进程哈希表中
+    set_links(proc);       // 设置进程的关系链
+    // 增加至链表的操作以及进程数+1的操作都在set_links中
+
+    local_intr_restore(intr_flag);
+
+    // 6. 将新进程设置为就绪状态
+    wakeup_proc(proc);
+
+    // 7. 返回新进程的pid
+    ret = proc->pid;
+
+    //LAB5 YOUR CODE : (update LAB4 steps)
+    //TIPS: you should modify your written code in lab4(step1 and step5), not add more code.
+   /* Some Functions
+    *    set_links:  set the relation links of process.  ALSO SEE: remove_links:  lean the relation links of process 
+    *    -------------------
+    *    update step 1: set child proc's parent to current process, make sure current process's wait_state is 0
+    *    update step 5: insert proc_struct into hash_list && proc_list, set the relation links of process
+    */
+ 
+fork_out:
+    return ret;
+
+bad_fork_cleanup_kstack:
+    put_kstack(proc);
+bad_fork_cleanup_proc:
+    kfree(proc);
+    goto fork_out;
+}
+```
+copy_range的编写
+```c++
+int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end,//复制一段内存区域的内容从一个进程的地址空间到另一个进程的地址空间
+               bool share) {
     assert(start % PGSIZE == 0 && end % PGSIZE == 0);
     assert(USER_ACCESS(start, end));
-    // //以页为单位进行复制
-    do
-    {
+    // copy content by page unit.
+    do {
         // call get_pte to find process A's pte according to the addr start
-        // 得到A&B的pte地址
         pte_t *ptep = get_pte(from, start, 0), *nptep;
-        if (ptep == NULL)
-        {
+        if (ptep == NULL) {
             start = ROUNDDOWN(start + PTSIZE, PTSIZE);
             continue;
         }
         // call get_pte to find process B's pte according to the addr start. If
         // pte is NULL, just alloc a PT
-        if (*ptep & PTE_V)
-        {
-            if ((nptep = get_pte(to, start, 1)) == NULL)
-            {
+        if (*ptep & PTE_V) {
+            if ((nptep = get_pte(to, start, 1)) == NULL) {
                 return -E_NO_MEM;
             }
             uint32_t perm = (*ptep & PTE_USER);
@@ -499,14 +346,36 @@ int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end, bool shar
             assert(page != NULL);
             assert(npage != NULL);
             int ret = 0;
-            // 1.找寻父进程的内核虚拟页地址
-            void *kva_src = page2kva(page);
-            // 2.找寻子进程的内核虚拟页地址
-            void *kva_dst = page2kva(npage);
-            // 3.复制父进程内容到子进程
-            memcpy(kva_dst, kva_src, PGSIZE);
-            // 4.建立物理地址与子进程的页地址起始位置的映射关系
+            /* LAB5:EXERCISE2 YOUR CODE
+             * replicate content of page to npage, build the map of phy addr of
+             * nage with the linear addr start
+             *
+             * Some Useful MACROs and DEFINEs, you can use them in below
+             * implementation.
+             * MACROs or Functions:
+             *    page2kva(struct Page *page): return the kernel vritual addr of
+             * memory which page managed (SEE pmm.h)
+             *    page_insert: build the map of phy addr of an Page with the
+             * linear addr la
+             *    memcpy: typical memory copy function
+             *
+             * (1) find src_kvaddr: the kernel virtual address of page
+             * (2) find dst_kvaddr: the kernel virtual address of npage
+             * (3) memory copy from src_kvaddr to dst_kvaddr, size is PGSIZE
+             * (4) build the map of phy addr of  nage with the linear addr start
+             */
+            // (1) 获取源页面的内核虚拟地址
+            void *src_kvaddr = page2kva(page);
+            // (2) 获取目标页面的内核虚拟地址
+            void *dst_kvaddr = page2kva(npage);
+            // (3) 将源页面的内容复制到目标页面
+            memcpy(dst_kvaddr, src_kvaddr, PGSIZE);
+            // (4) 将新页面映射到进程 B 的地址空间
             ret = page_insert(to, npage, start, perm);
+            if (ret != 0) {
+                return ret; // 如果映射失败，返回错误码
+            }
+
 
             assert(ret == 0);
         }
@@ -515,13 +384,6 @@ int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end, bool shar
     return 0;
 }
 ```
-
-具体实现就是：
-
-1. `void *kva_src = page2kva(page);`：获取父进程的内存页对应的内核虚拟地址。`page`是父进程的内存页，`page2kva`函数将页结构转换为对应的内核虚拟地址。
-2. `void *kva_dst = page2kva(npage);`：获取子进程的内存页对应的内核虚拟地址。`npage`是新分配给子进程的内存页。
-3. `memcpy(kva_dst, kva_src, PGSIZE);`：将父进程的内存页内容复制到子进程的内存页。`kva_src`是源地址（父进程的内存页），`kva_dst`是目标地址（子进程的内存页），`PGSIZE`是要复制的数据的大小（一个页的大小）。
-4. `ret = page_insert(to, npage, start, perm);`：将子进程的内存页插入到子进程的页表中。`to`是子进程的内存管理结构，`npage`是子进程的内存页，`start`是虚拟地址，`perm`是页的权限。
 
 
 
@@ -549,146 +411,91 @@ int copy_range(pde_t *to, pde_t *from, uintptr_t start, uintptr_t end, bool shar
 
 
 ## 练习3: 阅读分析源代码，理解进程执行 fork/exec/wait/exit 的实现，以及系统调用的实现（不需要编码）
-
-请在实验报告中简要说明你对 fork/exec/wait/exit函数的分析。并回答如下问题：
-
-- 请分析fork/exec/wait/exit的执行流程。重点关注哪些操作是在用户态完成，哪些是在内核态完成？内核态与用户态程序是如何交错执行的？内核态执行结果是如何返回给用户程序的？
-- 请给出ucore中一个用户态进程的执行状态生命周期图（包执行状态，执行状态之间的变换关系，以及产生变换的事件或函数调用）。（字符方式画即可）
-
-执行：make grade。如果所显示的应用程序检测都输出ok，则基本正确。（使用的是qemu-1.0.1）
-
-
-
-#### 1、fork函数
+请在实验报告中简要说明你对 fork/exec/wait/exit函数的分析。并回答如下问题： 
+（1）请分析fork/exec/wait/exit的执行流程。重点关注哪些操作是在用户态完成，哪些是在内核态完成？ 内核态与用户态程序是如何交错执行的？内核态执行结果是如何返回给用户程序的？ 
 
 执行流程：
 
-```c++
-fork->SYS_fork->do_fork+wakeup_proc->syscall(SYS_fork)->ecall
-```
+① fork函数（kern/process/proc.c） 
 
-在用户态：父进程init调用fork函数，随后触发系统调用SYS_fork进入内核态；
+调用过程：fork->SYS_fork->do_fork+wakeup_proc
+进程调用 fork 系统调用，进入正常的中断处理机制，最终交由 syscall 函数进行处理，在 syscall 函数中，根据系统调用，交由 sys_fork 函数处理，该函数进一步调用了 do_fork 函数。 
 
-内核态：do_fork函数复制init进程的所有资源如mm、文件信息等，还会新建`proc_struct`和子进程的内核栈，这样就创建一个子进程，随后fork调用返回，程序将回到用户态
+具体流程：
+	首先检查当前总进程数目是否到达限制，如果到达限制，那么返回 E_NO_FREE_PROC ；
+	分配并初始化进程控制块(alloc_proc 函数);
+	分配并初始化内核栈(setup_stack 函数);
+	根据 clone_flag标志复制或共享进程内存管理结构(copy_mm 函数);
+	设置进程在内核(将来也包括用户态)正常运行和调度所需的中断帧和执行上下文(copy_thread 函数);
+	调用 get_pid() 为进程分配一个PID；
+	把设置好的进程控制块放入hash_list 和 proc_list 两个全局进程链表中，并实现相关进程的链接;
+	返回进程的 PID 。
 
-用户态：通过fork函数得到了新进程PID
+② exec函数（kern/process/proc.c）
 
+调用过程：SYS_exec->do_execve
 
+具体流程： 
+	检查进程名称的地址和长度是否合法，如果合法，那么将名称暂时保存在函数栈中，否则返回 E_INVAL ； 
+	将cr3页表基址指向内核页表，然后实现对进程的内存管理区域的释放； 
+	调用 load_icode 将代码加载进内存并建立新的内存映射关系，如果加载错误，那么调用 panic 报错； 
+	调用 set_proc_name 重新设置进程名称。 
 
-#### 2、exec函数
+③ wait函数（kern/process/proc.c）
 
-执行流程：
+调用过程： SYS_wait->do_wait
 
-```c++
-user_main()->kernel_execve()->ebreak->syscall()->SYS_exec->do_execve
-```
+具体流程： 
+	首先检查用于保存返回码的 code_store 指针地址位于合法的范围内； 
+	根据PID找到需要等待的子进程PCB，循环询问正在等待的子进程的状态，直到有子进程状态变为 ZOMBIE ： 
+	如果没有需要等待的子进程，那么返回 E_BAD_PROC ； 
+	如果子进程正在可执行状态中，那么将当前进程休眠，在被唤醒后再次尝试； 
+	如果子进程处于僵尸状态，那么释放该子进程剩余的资源，即完成回收工作。 
 
-在用户态：父进程将PC放在`user_main`函数处，通过宏定义进行系统调用，进入`kernel_execve()`。
+④ exit函数（kern/process/proc.c）
 
-内核态：`kernel_execve()`通过`ebreak`进行系统调用，进而调用 `load_icode` 函数加载二进制文件，随后执行用户进程
+调用过程： SYS_exit->exit 
 
+具体流程： 
+	先判断是否是用户进程，如果是，则开始回收此用户进程所占用的用户态虚拟内存空间；
+	设置当前进程状态为PROC_ZOMBIE，然后设置当前进程的退出码为error_code。此时这个进程已经无法再被调度了，只能等待父进程来完成最后的回收工作；
+	如果当前父进程已经处于等待子进程的状态，即父进程的wait_state被置为WT_CHILD，则此时就可以唤醒父进程，让父进程来帮子进程完成最后的资源回收工作；
+	如果当前进程还有子进程,则需要把这些子进程的父进程指针设置为内核线程init,且各个子进程指针需要插入到init的子进程链表中。如果某个子进程的执行状态是 PROC_ZOMBIE,则需要唤醒 init来完成对此子进程的最后回收工作；
+	执行schedule()调度函数，选择新的进程执行。
 
+内核态与用户态操作分析： 
 
-#### 3、wait函数
+① fork
+用户态：父进程调用 fork() 系统调用。 
+内核态：内核复制父进程的所有资源（内存、文件描述符等），创建一个新的子进程。 
+用户态：子进程从 fork 调用返回，得到一个新的进程ID（PID），父进程也从 fork 调用返回，得到子进程的PID。 
+② exec
+用户态：进程调用 exec 系统调用，加载并执行新的程序。 
+内核态：内核加载新程序的代码和数据，并进行一些必要的初始化。 
+用户态：新程序开始执行，原来的程序替换为新程序。 
+③ wait
+用户态：父进程调用 wait 或 waitpid 系统调用等待子进程的退出。 
+内核态：如果子进程已经退出，内核返回子进程的退出状态给父进程；如果子进程尚未退出， 
+父进程被阻塞，等待子进程退出。 
+用户态：父进程得到子进程的退出状态，可以进行相应的处理。 
+④ exit
+用户态：进程调用 exit 系统调用，通知内核准备退出。 
+内核态：内核清理进程资源，包括释放内存、关闭文件等。 
+用户态：进程退出，返回到父进程。 
 
-```c++
-wait()->sys_wait()->do_wait
-```
+总的来说：
+fork会修改创建的子进程的状态为PROC_RUNNABLE，而当前进程状态不变。
+exec不修改当前进程的状态，但会替换内存空间里所有的数据与代码。
+wait会先检测是否存在子进程。如果存在进入PROC_ZONBIE的子进程，则回收该进程并函数返回。但若存在尚处于PROC_RUNNABLE的子进程，则当前进程会进入PROC_SLEEPING状态，并等待子进程唤醒。
+exit会将当前进程状态设置为PROC_ZONBIE，并唤醒父进程，使其处于PROC_RUNNABLE的状态，之后主动让出CPU。
 
-用户态：执行wait函数，随后使用系统调用进入`sys_wait`函数，此时进入内核态
-
-内核态：调用`do_wait`函数，让父进程休眠并调度，等待这子进程的退出
-
-用户态：`do_wait`函数退出后将释放子进程的内核堆栈、子进程的进程控制块，此时回到用户态的`wait`函数返回的地方，继续执行用户态函数中`wait`函数返回后面的代码
-
-
-
-#### 4、exit函数
-
-```c++
-exit()->sys_exit()->do_exit()
-```
-
-用户态：执行exit函数，随后使用系统调用进入`sys_exit`函数，此时进入内核态
-
-内核态：调用`do_exit`函数，释放进程的虚拟内存空间、调用调度函数进行调度，选择新的进程去执行
-
-用户态：`do_exit`函数退出后将回到用户态的`wait`函数返回的地方，继续执行用户态函数中`exit`函数返回后面的代码
-
-
-
-#### 5、内核态执行结果如何返回给用户态程序
-
-通过中断和异常机制反馈给用户态。内核利用特定的数据结构（例如进程控制块和中断帧）来记录用户程序的当前状态。完成系统调用之后，内核通过中断返回指令（IRET）将执行流程交回用户程序，并利用之前保存的状态信息恢复用户程序的执行环境，从而使用户程序能够从中断点继续运行。
-
-
-
-#### 6、用户态进程生命周期图
-
-```mermaid
-stateDiagram-v2
-    [*]-->内核态:syscall()
-    内核态--> UNINIT: alloc_proc()/do_fork()
-    UNINIT --> RUNNABLE: wakeup_proc()
-    RUNNABLE --> RUNNING: proc_run()
-    RUNNING --> SLEEPING:  do_wait / do_sleep
-    SLEEPING --> ZOMBIE: do_exit
-    ZOMBIE --> [*]
-    RUNNING --> ZOMBIE: do_exit
-    SLEEPING --> RUNNABLE: wakeup_proc
-    RUNNING --> RUNNABLE: interrupt / yield
-    RUNNING --> UNINIT: exit() / failed
-    RUNNABLE --> UNINIT: exit() / failed
-    SLEEPING --> UNINIT: exit() / failed
-```
-
-#### 7、结果展现
-
-`make grade`结果
-
-![image-20231210204137474](image/lab5_1.png)
-
-![image-20231210204146022](image/lab5_2.png)
-
-`make qemu`结果
-
-![image-20231210204146022](image/lab5_3.png)
+（2）请给出ucore中一个用户态进程的执行状态生命周期图（包执行状态，执行状态之间的变换关系， 以及产生变换的事件或函数调用）。（字符方式画即可） 
+图片见仓库中exe3.png
 
 
+##扩展练习 Challenge
+### 2. 说明该用户程序是何时被预先加载到内存中的？与我们常用操作系统的加载有何区别，原因是什么？
 
-
-
-## 扩展练习 Challenge2
-
-说明该用户程序是何时被预先加载到内存中的？与我们常用操作系统的加载有何区别，原因是什么？
-
-
-
-#### 1、何时载入内存
-
-应当是在整个项目编译的时候载入内存的，在宏定义`KERNEL_EXECVE`我们可以发现用户态的程序载入其实是通过特定的编译输出文件，此次实验更改了Makefile，并且通过ld指令将用户态程序（user文件夹下的代码）编译链接到项目中。所以在ucore启动的时候用户程序就被加载在内存中了。
-
-#### 2、与常用操作系统的加载的区别与原因
-
-- 区别：常规OS中，应用程序会在被需要时才加载到内存中，只有用户需要运行程序，OS才会加载程序到内存
-- 原因：我们的用户进程程序并不是通过调度找到的，是直接由init进程fork出来的，本次实验的项目中我们只实现了从内核态的init进程出发执行用户进程，没有实现用户进程间的调度，直接将用户程序加载到内存方便了代码实现
-
-
-
-
-
-## 涉及的知识点
-
-#### 1、子进程的退出码
-
-子进程的退出码（exit code）是当一个进程结束时返回给其父进程的一个特定值，用于表示子进程的结束状态。这个值对于父进程来说非常重要，因为它提供了关于子进程结束方式的信息。退出码的含义如下：
-
-1. **成功或正常结束**:
-   - 通常，如果子进程成功完成其任务并正常退出，它会返回一个 `0` 值，表示“成功”或“没有错误”。
-2. **错误或异常结束**:
-   - 如果子进程因为某种错误或异常情况而结束，它会返回一个非零值。这个非零值通常指定了特定的错误码或结束原因。
-   - 不同的非零值可以表示不同类型的错误，例如，`1` 可能表示一般性错误，而其他值可能指代特定的错误条件或异常。
-3. **由信号结束**:
-   - 如果子进程因为接收到一个信号而结束（例如，被强制终止），退出码可能包含关于该信号的信息。
-4. **自定义退出码**:
-   - 子进程可以使用自定义的退出码来表示特定的结束状态或结果。这些值可以由开发者根据应用程序的逻辑自定义。
+用户程序是在项目编译的时候载入内存的。通过宏定义KERNEL_EXECVE，我们可以发现，用户态的程序载入其实是通过特定的编译输出文件。此次实验更改了Makefile，并且通过ld指令将用户态程序（user文件夹下的代码）编译链接到项目中。所以在ucore启动的时候，用户程序就被加载在内存中了。
+在常见的操作系统中应用程序并不是在系统启动时就被加载到内存中。相反，当用户需要运行某个应用程序时，操作系统才会将其加载到内存中。这种方式被称为延迟加载或按需加载。这是因为常用操作系统需要支持多任务和动态加载程序的特性，因此用户程序可能是在运行时才被加载到内存中的。这种加载方式具有灵活性，可以在运行时根据需要加载不同的程序，节省内存空间。
+而在ucore实验中，由于ucore是一个简化的操作系统，没有实现动态加载的功能。由于ucore的内核空间实在是太小了，如果最开始将大部分的文件一口气上传，可能会导致ucore内核空间不足溢出等非常严重的问题。因此，在实验中用户程序是在ucore启动时就被预先加载到内存中，一起进行初始化和启动，同时免了在运行时多次从磁盘加载用户程序的开销。
